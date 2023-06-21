@@ -17,35 +17,12 @@ import random
 from pathlib import Path
 from tqdm import tqdm
 
-
-def compute_E_y(y):
-    zeros_tensor = torch.zeros_like(y)
-    ones_tensor = torch.ones_like(y)
-    y_hat = torch.where(y < 0.5,zeros_tensor,ones_tensor)
-    
-
-    y_one_number = torch.sum(y_hat)
-    num = y_hat.numel()
-    y_zero_number = num - y_one_number
-    P_one = y_one_number / num
-    P_zero = y_zero_number / num
-
-    # E_one = - P_one * (torch.log(P_one + 1e-10) / math.log(2.0))
-    # E_zero = - P_zero * (torch.log(P_zero + 1e-10) / math.log(2.0))
-    E_one = - P_one * torch.log2(P_one + 1e-10)
-    E_zero = - P_zero * torch.log2(P_zero + 1e-10)
-    E_y  = E_one + E_zero
-
-    return E_y
-
-
 parser = argparse.ArgumentParser(description='CSNet')
 
-parser.add_argument('--testpath', type=str, default='../test_img/visual/', 
+parser.add_argument('--testpath', type=str, default='../test_img/128/', 
                     help='Sun-Hays80,BSD100,urban100' )#测试图像文件夹
-parser.add_argument('--image-size',type=int,default=128,metavar='N')
 
-parser.add_argument('--model',default='./runs/train/exp45/model/best.pt')
+parser.add_argument('--model',default='./runs/train/exp57/model/best.pt')
 parser.add_argument('--save_path',default='./')#重建图像保存的文件夹
 
 parser.add_argument('--project', default='runs/val', help='save to project/name')
@@ -53,6 +30,7 @@ parser.add_argument('--name', default='exp', help='save to project/name')
 parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
 
 parser.add_argument('--batch-size',type=int,default=1,metavar='N')
+parser.add_argument('--image-size',type=int,default=128,metavar='N')
 parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
 
 parser.add_argument('--half',action='store_true',default=False)
@@ -105,26 +83,6 @@ def calc_ent(x):
         ent -= p * logp
     return ent
 
-from typing import Any, Tuple
-class ImageFolderPath(torchvision.datasets.ImageFolder):
-
-    def __getitem__(self, index: int) -> Tuple[Any, Any]:
-        """
-        Args:
-            index (int): Index
-
-        Returns:
-            tuple: (sample, target) where target is class_index of the target class.
-        """
-        path, target = self.samples[index]
-        sample = self.loader(path)
-        if self.transform is not None:
-            sample = self.transform(sample)
-        if self.target_transform is not None:
-            target = self.target_transform(target)
-
-        return sample, target, path
-
 def data_loader():
     kwopt = {'num_workers': 8, 'pin_memory': True} if opt.cuda else {}
     transforms = torchvision.transforms.Compose([
@@ -133,7 +91,7 @@ def data_loader():
                     torchvision.transforms.ToTensor(),
                     # torchvision.transforms.Normalize((0.5,0.5,0.5),(0.5,0.5,0.5))
                                         ])
-    dataset = ImageFolderPath(opt.testpath,transform=transforms)
+    dataset = torchvision.datasets.ImageFolder(opt.testpath,transform=transforms)
     test_loader = torch.utils.data.DataLoader(dataset,batch_size = opt.batch_size,shuffle = False,**kwopt)
     return dataset, test_loader
 
@@ -158,7 +116,21 @@ def evaluation(test_dataset, testloader):
     G.to(device)
     G.eval()
 
+    # G_fuse = torch.quantization.fuse_modules(G, [['fc', 'relu']])
+    # print(G_fuse)
+
     
+    backend = "fbgemm"
+    G.qconfig = torch.quantization.get_default_qconfig(backend)  # 不同平台不同配置
+
+    # listmix = [['conv','relu']] # 可以是conv+bn conv+relu conv+bn+relu 
+    # G_fuse = torch.quantization.fuse_modules(G, listmix) # 合并某些层，不想合并这句也可以跳过
+
+    G_prepared = torch.quantization.prepare(G)
+    G_int8 = torch.quantization.convert(G_prepared)
+
+    G_int8.eval()
+
     # 获得
     classnames = test_dataset.classes
     class_to_idx = test_dataset.class_to_idx
@@ -168,10 +140,10 @@ def evaluation(test_dataset, testloader):
         G.half()
 
     mse_total = 0
-    E_y_total = []
-    for idx, (input, class_id, img_path) in tqdm(enumerate(testloader), total=len(testloader)):
+    for idx, (input, class_id) in tqdm(enumerate(testloader), total=len(testloader)):
         
         classname = classnames[class_id.item()]
+
 
         input = input.to(device)
         input = norm_256(input)
@@ -181,36 +153,15 @@ def evaluation(test_dataset, testloader):
 
         target = torch.tensor(input.cpu().numpy(), device=device)
 
-        output, y = G(input)
-
+        # output, y = G(input)
+        output, y = G_int8(input)
 
         # y = (y > 0.5).float()
-        E_y  = compute_E_y(y)
-        E_y_total.append(E_y)
-
         y_save = y.cpu().detach().numpy()
 
-        # save_name = classname + '_' + str(idx)
-        img_path=img_path[0]
-        save_name = os.path.splitext(os.path.basename(img_path))[0]
-
+        save_name = classname + '_' + str(idx)
         np.savetxt('%s/measurement/%s.txt' %(opt.save_path, save_name),y_save.ravel(),fmt='%d')
-
-        # # 二进制压缩码流
-        # y_visual = ["1_17__0__128.bmp", "1_17__0__384.bmp", "1_17__128__592.bmp"]
-        # if save_name+".bmp" in y_visual:
-        #     print(y.shape)
-        #     y = y.squeeze()
-        #     # 拆分通道
-        #     y_split = torch.chunk(y,8,dim=0)
-        #     y_split = [i.squeeze().cpu().numpy() for i in y_split]
-        #     for i,img in enumerate(y_split):
-        #         cv2.imwrite(f"{save_name}_{i}.png", img*255.0)
-        #         print(img.sum())
-        #     # exit()
-        # else:
-        #     continue
-
+        
         mse = criterion_mse(output,target)
         mse_total += mse.item()
 
@@ -222,7 +173,6 @@ def evaluation(test_dataset, testloader):
         vutils.save_image(target.data,'%s/orig/%s.bmp'% (opt.save_path, save_name), padding=0)
         vutils.save_image(output.data,'%s/recon/%s.bmp' % (opt.save_path, save_name), padding=0)
 
-    print("Test: average E_y: %.4f," % (sum(E_y_total).cpu().item()/ len(testloader)))
     print('Test: average mse: %.4f,' % (mse_total / len(testloader)))
 
 def main():
@@ -254,10 +204,6 @@ def main():
         recon_img = cv2.imread('%s/recon/%s.bmp' % (opt.save_path, name), flags=cv2.IMREAD_GRAYSCALE)
         psnr = compare_psnr(orig_img,recon_img)
         ssim = compare_ssim(orig_img,recon_img,multichannel=False)
-
-        # ls = ["1_17__0__128.bmp", "1_17__0__256.bmp", "1_17__0__384.bmp"]
-        # if name+".bmp" in ls:
-        #     print(name, psnr, ssim)
 
         orig_fsize = os.path.getsize('%s/orig/%s.bmp'% (opt.save_path, name))
         y_fsize = os.path.getsize('%s/measurement/%s.zip'%(opt.save_path, name))

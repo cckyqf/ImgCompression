@@ -124,37 +124,106 @@ class AttentionConv(nn.Module):
         init.normal_(self.rel_h, 0, 1)
         init.normal_(self.rel_w, 0, 1)
 
+# depthwise separable convolution
+# MobileNetV1的结构：Conv+BN+ReLu -> DW+BN+ReLu + PW+BN+ReLu
+#  depthwise卷积和pointwise卷积
+class DPWConv(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        padding: int = 0,
+        stride: int = 1,
+        bias: bool = True,
+        act_output = True,
+    ):
+        super().__init__()
+      
+        self.act_output = act_output
+
+        self.depth_conv = nn.Conv2d(in_channels, in_channels,  kernel_size=kernel_size, padding=padding, stride=stride, groups=in_channels, bias=bias)
+        self.point_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=0, stride=1, bias=bias)
+
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        
+        x = self.act(self.depth_conv(x))
+        x = self.point_conv(x)
+        if self.act_output:
+            x = self.act(x)
+        
+        return x
+
+
+class DPWConvChannelShuffle(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        padding: int = 0,
+        stride: int = 1,
+        bias: bool = True,
+        num_groups_point_conv: int = 1,
+        channel_shuffle: bool = True,
+        act = True,
+    ):
+        
+        super().__init__()
+
+        self.c_shuffle = ChannelShuffle(channels=in_channels, groups=num_groups_point_conv) if channel_shuffle else None
+
+        self.depth_conv = nn.Conv2d(in_channels, in_channels,  kernel_size=kernel_size, padding=padding, stride=stride, groups=in_channels, bias=bias)
+        self.point_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=0, stride=1, groups=num_groups_point_conv, bias=bias)
+
+        self.act = nn.ReLU(inplace=True) if act else None
+
+    def forward(self, x):
+        if self.c_shuffle is not None:
+            x = self.c_shuffle(x)
+        
+        x = self.depth_conv(x)
+        x = self.point_conv(x)
+        if self.act is not None:
+            x = self.act(x)
+
+        return x
+
 class DepthWiseConv(nn.Module):
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
         kernel_size: int,
-        padding: 0,
-        stride: 1,
+        padding: int = 0,
+        stride: int = 1,
         bias: bool = True,
+        num_groups_point_conv: int = 1,
+        channel_shuffle: bool = True,
+        act = True,
     ):
         
         super().__init__()
 
-        # 1x1x8的卷积，计算量才足够小，以满足FPGA的要求
-        num_groups = in_channels // 16
-        self.c_shuffle = ChannelShuffle(channels=in_channels, groups=num_groups)
+        self.c_shuffle = ChannelShuffle(channels=in_channels, groups=num_groups_point_conv) if channel_shuffle else None
 
         self.depth_conv = nn.Conv2d(in_channels, in_channels,  kernel_size=kernel_size, padding=padding, stride=stride, groups=in_channels, bias=bias)
-        self.relu1 = nn.ReLU(inplace=True)
-        
-        self.point_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=0, stride=1, groups=num_groups, bias=bias)
-        self.relu2 = nn.ReLU(inplace=True)
-    
+        self.point_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=0, stride=1, groups=num_groups_point_conv, bias=bias)
+
+        self.act = nn.ReLU(inplace=True) if act else None
+
     def forward(self, x):
+        if self.c_shuffle is not None:
+            x = self.c_shuffle(x)
         
-        x = self.c_shuffle(x)
-        x = self.relu1(self.depth_conv(x))
-        x = self.relu2(self.point_conv(x))
+        x = self.depth_conv(x)
+        x = self.point_conv(x)
+        if self.act is not None:
+            x = self.act(x)
 
         return x
-
 
 class ConvTranspose(nn.Module):
     # Standard convolution

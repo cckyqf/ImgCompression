@@ -16,6 +16,35 @@ from general import select_device, increment_path, norm_256
 import random
 from pathlib import Path
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import math 
+
+def feature_visualization(x, module_type, stage, n=32, save_dir=Path('runs/detect/exp')):
+    """
+    x:              Features to be visualized
+    module_type:    Module type
+    stage:          Module stage within model
+    n:              Maximum number of feature maps to plot
+    save_dir:       Directory to save results
+    """
+
+    batch, channels, height, width = x.shape  # batch, channels, height, width
+    if height > 1 and width > 1:
+        f = save_dir / f"stage{stage}_{module_type.split('.')[-1]}_features.png"  # filename
+
+        blocks = torch.chunk(x[0].cpu(), channels, dim=0)  # select batch index 0, block by channels
+        n = min(n, channels)  # number of plots
+        fig, ax = plt.subplots(math.ceil(n / 8), 8, tight_layout=True)  # 8 rows x n/8 cols
+        ax = ax.ravel()
+        plt.subplots_adjust(wspace=0.05, hspace=0.05)
+        for i in range(n):
+            ax[i].imshow(blocks[i].squeeze())  # cmap='gray'
+            ax[i].axis('off')
+
+        print(f'Saving {f}... ({n}/{channels})')
+        plt.savefig(f, dpi=300, bbox_inches='tight')
+        plt.close()
+        np.save(str(f.with_suffix('.npy')), x[0].cpu().numpy())  # npy save
 
 
 def compute_E_y(y):
@@ -45,7 +74,7 @@ parser.add_argument('--testpath', type=str, default='../test_img/visual/',
                     help='Sun-Hays80,BSD100,urban100' )#测试图像文件夹
 parser.add_argument('--image-size',type=int,default=128,metavar='N')
 
-parser.add_argument('--model',default='./runs/train/exp45/model/best.pt')
+parser.add_argument('--model',default='./runs/train/exp57/model/best.pt')
 parser.add_argument('--save_path',default='./')#重建图像保存的文件夹
 
 parser.add_argument('--project', default='runs/val', help='save to project/name')
@@ -181,47 +210,44 @@ def evaluation(test_dataset, testloader):
 
         target = torch.tensor(input.cpu().numpy(), device=device)
 
-        output, y = G(input)
-
-
-        # y = (y > 0.5).float()
-        E_y  = compute_E_y(y)
-        E_y_total.append(E_y)
-
-        y_save = y.cpu().detach().numpy()
-
-        # save_name = classname + '_' + str(idx)
+        # output, y = G(input)
         img_path=img_path[0]
         save_name = os.path.splitext(os.path.basename(img_path))[0]
 
-        np.savetxt('%s/measurement/%s.txt' %(opt.save_path, save_name),y_save.ravel(),fmt='%d')
+        y_visual = ["1_17__0__128.bmp",]
+        if save_name+".bmp" in y_visual:
 
-        # # 二进制压缩码流
-        # y_visual = ["1_17__0__128.bmp", "1_17__0__384.bmp", "1_17__128__592.bmp"]
-        # if save_name+".bmp" in y_visual:
-        #     print(y.shape)
-        #     y = y.squeeze()
-        #     # 拆分通道
-        #     y_split = torch.chunk(y,8,dim=0)
-        #     y_split = [i.squeeze().cpu().numpy() for i in y_split]
-        #     for i,img in enumerate(y_split):
-        #         cv2.imwrite(f"{save_name}_{i}.png", img*255.0)
-        #         print(img.sum())
-        #     # exit()
-        # else:
-        #     continue
+            '''编码器的前半部分'''
+            y = G.sample1(input)
+            y = G.sample2(y)
+            y = G.sample3(y)
+            
+            zeros_tensor = torch.zeros_like(y)
+            ones_tensor = torch.ones_like(y)
+            y = torch.where(y < 0.5,zeros_tensor,ones_tensor)
 
-        mse = criterion_mse(output,target)
-        mse_total += mse.item()
 
-        z = zipfile.ZipFile('%s/measurement/%s.zip'%(opt.save_path, save_name),'w', zipfile.ZIP_DEFLATED) #压缩
-        z.write('%s/measurement/%s.txt' %(opt.save_path, save_name))
+            '''解码器'''
+            output = G.recon_feat(y)
 
-        # print('Test:[%d/%d] mse:%.4f \n' % (idx,len(testloader),mse.item()))
+            output = G.layer0(output)
 
-        vutils.save_image(target.data,'%s/orig/%s.bmp'% (opt.save_path, save_name), padding=0)
-        vutils.save_image(output.data,'%s/recon/%s.bmp' % (opt.save_path, save_name), padding=0)
+            output = G.layer1(output)
 
+            output = G.layer2[:1](output)
+            feature_visualization(output, module_type="ResBlock", stage=2, n=32, save_dir=Path(''))
+            exit()
+
+            output = G.layer3(output)
+            
+            # feature_visualization(output, module_type="ResBlock", stage=3, n=32, save_dir=Path(''))
+            # exit()
+
+        else:
+            continue
+
+
+    
     print("Test: average E_y: %.4f," % (sum(E_y_total).cpu().item()/ len(testloader)))
     print('Test: average mse: %.4f,' % (mse_total / len(testloader)))
 
@@ -254,10 +280,6 @@ def main():
         recon_img = cv2.imread('%s/recon/%s.bmp' % (opt.save_path, name), flags=cv2.IMREAD_GRAYSCALE)
         psnr = compare_psnr(orig_img,recon_img)
         ssim = compare_ssim(orig_img,recon_img,multichannel=False)
-
-        # ls = ["1_17__0__128.bmp", "1_17__0__256.bmp", "1_17__0__384.bmp"]
-        # if name+".bmp" in ls:
-        #     print(name, psnr, ssim)
 
         orig_fsize = os.path.getsize('%s/orig/%s.bmp'% (opt.save_path, name))
         y_fsize = os.path.getsize('%s/measurement/%s.zip'%(opt.save_path, name))

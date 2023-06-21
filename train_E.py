@@ -7,7 +7,7 @@ import torchvision.utils as vutils
 import torchvision
 import os
 import argparse
-from model import net_DWConv, net_paper, net_SASA2, net_DW_Trans, net_DW_CBAM
+from model import net_DWConv, net_paper, net_SASA2, net_DWConvDense, net_encoder, net_decoder
 from torch.utils.tensorboard import SummaryWriter
 
 '''在损失函数中加入了对y的熵的约束，使其尽可能服从均匀分布，即01个数接近'''
@@ -20,12 +20,15 @@ from pathlib import Path
 def parse_opt():
 
     parser = argparse.ArgumentParser(description='CSNet')
-    parser.add_argument('--model_name', type=str, default='net_DWConv', 
-                        help='i.e. net_paper, net_SATA2, net_DWConv, net_DW_Trans, net_DW_CBAM')
+    parser.add_argument('--model_name', type=str, default='net_decoder', 
+                        help='i.e. net_paper, net_DWConv, net_DWConvDense, net_encoder, net_decoder')
     parser.add_argument('--trainpath',default='../Image/256_size/train/')
     parser.add_argument('--valpath',default='../Image/128_size/val/')
-    parser.add_argument('--batch-size',type=int,default=16,metavar='N')
     parser.add_argument('--image-size',type=int,default=128,metavar='N')
+
+    parser.add_argument('--batch-size',type=int,default=16,metavar='N')
+    parser.add_argument('--base',type=int,default=32)#卷积核的数量
+
     parser.add_argument('--start_epoch',type=int,default=0,metavar='N')#加载checkpoint即会改变
     # parser.add_argument('--epochs',type=int,default=15000,metavar='N')
     # parser.add_argument('--lr_deacy',type=float,default=5000,metavar='LR') # 第几个epoch开始衰减
@@ -34,7 +37,7 @@ def parse_opt():
     parser.add_argument('--lr',type=float,default=1e-4,metavar='LR')
 
     parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-
+    
     parser.add_argument('--project', default='runs/train', help='save to project/name')
     parser.add_argument('--name', default='exp', help='save to project/name')
     parser.add_argument('--exist-ok', action='store_true', help='existing project/name ok, do not increment')
@@ -45,7 +48,6 @@ def parse_opt():
     parser.add_argument('--log-interval',type=int,default=20,metavar='N')
     parser.add_argument('--save_path',default='./test')
     parser.add_argument('--outf',default='./')
-    parser.add_argument('--base',type=int,default=32)#卷积核的数量
     parser.add_argument('--M',type=int,default=8)#y的通道数
     parser.add_argument('--gamma',type=float,default=0.01)#率失真的比例
     parser.add_argument('--mode',type=str,default="train")
@@ -63,6 +65,11 @@ def compute_loss(criterion_mse, output, target, E_y, ngpu, gamma):
         loss_r = torch.tensor([0], device=E_y.device)
     loss_mse = criterion_mse(output,target)
     loss = loss_mse - loss_r
+    
+    # loss = loss_mse
+
+    # loss_r = gamma * torch.abs(E_y-0.7)
+    # loss = loss_mse + loss_r
 
     return loss, loss_mse.item(), loss_r.item()
 
@@ -108,6 +115,7 @@ def train(writer, device, opt):
     # 网络的前向传播过程写入tensorboard
     # [0,1]之间均匀分布
     example = torch.rand((1, channels, opt.image_size,opt.image_size), device=device)
+
     writer.add_graph(torch.jit.trace(G, example, strict=False), [])
 
     for m in G.modules():
